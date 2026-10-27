@@ -1,6 +1,6 @@
 # licensr-go
 
-Official Go SDK for the [Licensr](https://licensr.app) license API: validation, seat/domain activation, offline EdDSA token verification, and hosted checkout — plus a hardware ID and a token store that saves to disk, for desktop tools that must unlock offline. Go 1.22+, no third-party dependencies (offline verification uses the standard library's `crypto/ed25519`).
+Official Go SDK for the [Licensr](https://licensr.app) license API: validation, seat/domain activation, offline EdDSA token verification, and hosted checkout — plus a hardware ID and a token store that saves to disk, for desktop tools that must unlock offline. Go 1.22+, no third-party dependencies (offline verification uses the standard library's `crypto/ed25519`; only the conformance test uses `gopkg.in/yaml.v3`).
 
 See the [License calls guide](https://docs.licensr.app/plugin-integration) for the underlying API's concepts (activation modes, entitlement/fallback, rate limits, the embedded-key doctrine) and the [Go SDK guide](https://docs.licensr.app/sdks/go) for the full walkthrough — this README covers the Go-specific surface.
 
@@ -49,19 +49,25 @@ Every method takes a `context.Context`, blocks until it has an answer, and retur
 | `Checkout(ctx, CheckoutRequest{...})`       | `POST /v1/billing/checkout`   | Returns `CheckoutURL`. Requires a key with the `checkout` scope.                                                         |
 | `LastValidated()`                           | _(no request)_                | The last successful `Validate` result, or `nil`. Never blocks — safe on a hot path.                                      |
 
-`Config` also takes `BaseURL`, `DeviceID` (buckets rate limits per installation — pass the hardware ID), `Origin`, `Timeout` (per attempt), `Retry` (network errors / 429 / 5xx, exponential backoff + full jitter, honors `Retry-After`; default 2 retries), `HTTPClient`, and `Hooks` (`OnValidated`, `OnActivated`, `OnDeactivated`, `OnTokenIssued`, `OnRetry`, `OnError`).
+`Config` also takes `BaseURL`, `DeviceID` (buckets rate limits per installation — pass the hardware ID), `Origin`, `Timeout` (per attempt), `Retry` (network errors / 429 / 5xx, exponential backoff + full jitter, honors `Retry-After`; default 2 retries, and delays you leave at zero keep their 300ms/5s defaults), `HTTPClient`, and `Hooks` (`OnValidated`, `OnActivated`, `OnDeactivated`, `OnTokenIssued`, `OnRetry`, `OnError`).
 
 ### Offline verification and token storage
 
 ```go
 token, err := client.Token(ctx, licensr.ValidateRequest{LicenseKey: licenseKey})
-claims, err := licensr.VerifyOfflineToken(ctx, token.Token, token.Details.JWKSURL, nil)
+jwks, err := licensr.FetchJWKS(ctx, token.Details.JWKSURL, nil)
+opts := &licensr.VerifyOptions{PluginSlug: "my-plugin", JWKS: jwks}
+claims, err := licensr.VerifyOfflineToken(ctx, token.Token, "", opts)
 
 store := licensr.NewFileTokenStore("my-plugin", "") // "" = the platform's app-data folder
-err = store.Set(licenseKey, licensr.CachedOfflineToken{Token: token.Token, Claims: *claims, CachedAt: time.Now()})
+err = store.Set(licenseKey, licensr.CachedOfflineToken{Token: token.Token, JWKS: jwks, CachedAt: time.Now()})
+// Next launch, no network: VerifyOfflineToken(ctx, cached.Token, "", &licensr.VerifyOptions{PluginSlug: "my-plugin", JWKS: cached.JWKS})
 ```
 
-The JWKS is fetched once per URL and cached for the process lifetime (refetched once on an unknown `kid`; `ClearJWKSCache` forces a refetch). Offline tokens carry no revocation signal — re-validate online before `claims.Exp`. `NewFileTokenStore` uses the same folders as the C++ SDK's `FileTokenStore`; `NewMemoryTokenStore` doesn't survive a restart; implement `TokenStore` for your own storage.
+- **Always set `VerifyOptions.PluginSlug`.** Every product in a store is signed with the same key, so without it one product's token also verifies for another.
+- Without `VerifyOptions.JWKS`, the key set is downloaded from the URL (10s timeout), cached for the process lifetime, and downloaded again on an unknown `kid`; `ClearJWKSCache` forces a fresh download.
+- Offline tokens carry no revocation signal — re-validate online before `claims.Exp`.
+- `CachedOfflineToken` deliberately holds no claims (a file can be edited); re-verify to read them. `NewFileTokenStore` uses the same folders as the C++ SDK's `FileTokenStore` (with a `.json` extension, so the two never collide); `NewMemoryTokenStore` doesn't survive a restart; implement `TokenStore` for your own storage.
 
 ### Hardware IDs
 
@@ -69,11 +75,11 @@ The JWKS is fetched once per URL and cached for the process lifetime (refetched 
 
 ### Errors
 
-| Error                     | When                                                                                                       |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `*APIError`               | Non-2xx response. `Status`, `Code` (the `Code*` constants), `Message`, `RetryAfter`. Branch on `Code`.     |
-| `*NetworkError`           | No response at all (network failure, timeout, cancelled context, retries exhausted). Unwraps to the cause. |
-| `*TokenVerificationError` | `VerifyOfflineToken` rejected a bad signature, wrong algorithm, or an expired/not-yet-valid token.         |
+| Error                     | When                                                                                                                         |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `*APIError`               | Non-2xx response. `Status`, `Code` (the `Code*` constants), `Message`, `RetryAfter`. Branch on `Code`.                       |
+| `*NetworkError`           | No response at all (network failure, timeout, cancelled context, retries exhausted). Unwraps to the cause.                   |
+| `*TokenVerificationError` | The token was rejected (signature, algorithm, product, expiry), or the key set couldn't be downloaded. Unwraps to the cause. |
 
 [`examples/cli`](examples/cli) puts it all together: unlock from a saved token when there is one, otherwise validate, activate this computer, and save a fresh token.
 

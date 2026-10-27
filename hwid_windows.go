@@ -27,8 +27,9 @@ func readRawHardwareID() (string, error) {
 func readMachineGUID() (string, error) {
 	path, _ := syscall.UTF16PtrFromString(`SOFTWARE\Microsoft\Cryptography`)
 	var key syscall.Handle
-	const keyWow6464Key = 0x0100 // Read the native registry view from a 32-bit process too.
-	if err := syscall.RegOpenKeyEx(syscall.HKEY_LOCAL_MACHINE, path, 0, syscall.KEY_QUERY_VALUE|keyWow6464Key, &key); err != nil {
+	// Default registry view, like the C++ SDK's RegGetValueW, so a 32-bit
+	// build gets the same answer (or the same failure) as a 32-bit C++ build.
+	if err := syscall.RegOpenKeyEx(syscall.HKEY_LOCAL_MACHINE, path, 0, syscall.KEY_QUERY_VALUE, &key); err != nil {
 		return "", err
 	}
 	defer syscall.RegCloseKey(key)

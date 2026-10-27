@@ -1,6 +1,7 @@
 package licensr
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,10 +11,9 @@ import (
 )
 
 func sampleEntry(token string) CachedOfflineToken {
-	maxSeats := 5
 	return CachedOfflineToken{
 		Token:    token,
-		Claims:   OfflineTokenClaims{Sub: "lic-1", Exp: 1_900_000_000, Valid: true, Status: StatusActive, MaxSeats: &maxSeats},
+		JWKS:     json.RawMessage(`{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"kid-1","x":"abc"}]}`),
 		CachedAt: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 }
@@ -67,7 +67,7 @@ func TestFileTokenStore(t *testing.T) {
 
 	t.Run("hashes the license key into the file name", func(t *testing.T) {
 		_ = store.Set("../../etc/passwd", sampleEntry("token"))
-		path := filepath.Join(store.Dir(), sha256Hex("../../etc/passwd")+".token")
+		path := filepath.Join(store.Dir(), sha256Hex("../../etc/passwd")+".json")
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
@@ -77,6 +77,15 @@ func TestFileTokenStore(t *testing.T) {
 		}
 		if leftovers, _ := filepath.Glob(filepath.Join(store.Dir(), "*.tmp")); len(leftovers) != 0 {
 			t.Errorf("temp files left behind: %v", leftovers)
+		}
+	})
+
+	t.Run("reports a corrupted file instead of returning garbage", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(store.Dir(), sha256Hex("lic_bad")+".json"), []byte("eyJhbGciOi"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := store.Get("lic_bad"); err == nil {
+			t.Errorf("Get = %+v, want a decode error", got)
 		}
 	})
 }

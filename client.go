@@ -31,7 +31,8 @@ type Config struct {
 	HTTPClient *http.Client
 	// Per-attempt timeout. Zero means no timeout beyond the caller's context.
 	Timeout time.Duration
-	// Nil means DefaultRetry. Set MaxRetries to 0 to disable retries.
+	// Nil means DefaultRetry. A zero BaseDelay or MaxDelay keeps its default;
+	// set MaxRetries to 0 to disable retries.
 	Retry *RetryOptions
 	// Optional lifecycle callbacks.
 	Hooks Hooks
@@ -69,7 +70,13 @@ func NewClient(cfg Config) *Client {
 	}
 	c := &Client{cfg: cfg, retry: DefaultRetry, httpClient: cfg.HTTPClient}
 	if cfg.Retry != nil {
-		c.retry = *cfg.Retry
+		c.retry.MaxRetries = cfg.Retry.MaxRetries
+		if cfg.Retry.BaseDelay > 0 {
+			c.retry.BaseDelay = cfg.Retry.BaseDelay
+		}
+		if cfg.Retry.MaxDelay > 0 {
+			c.retry.MaxDelay = cfg.Retry.MaxDelay
+		}
 	}
 	if c.httpClient == nil {
 		c.httpClient = &http.Client{}
@@ -79,15 +86,17 @@ func NewClient(cfg Config) *Client {
 
 // Validate checks whether a license is valid for this plugin, without minting an offline token.
 func (c *Client) Validate(ctx context.Context, req ValidateRequest) (*ValidateResponse, error) {
-	res, err := call[ValidateResponse](ctx, c, "validate", requestSpec{
+	return call[ValidateResponse](ctx, c, "validate", requestSpec{
 		method: http.MethodPost,
 		path:   "v1/license/validate",
 		body:   map[string]any{"license_key": req.LicenseKey, "plugin_slug": c.cfg.PluginSlug},
-	}, c.cfg.Hooks.OnValidated)
-	if err == nil {
+	}, func(res *ValidateResponse) {
+		// Store first, so LastValidated inside OnValidated sees this result.
 		c.lastValidated.Store(res)
-	}
-	return res, err
+		if c.cfg.Hooks.OnValidated != nil {
+			c.cfg.Hooks.OnValidated(res)
+		}
+	})
 }
 
 // Token runs the same check as Validate, and on success mints a short-lived
@@ -150,7 +159,8 @@ func (c *Client) Checkout(ctx context.Context, req CheckoutRequest) (*CheckoutRe
 
 // LastValidated returns the most recent successful Validate result from
 // this client, or nil if Validate hasn't succeeded yet. It never blocks or
-// touches the network, so it is safe to call from any goroutine on a hot path.
+// touches the network, so it is safe to call from any goroutine on a hot
+// path. The result is shared: treat it as read-only.
 func (c *Client) LastValidated() *ValidateResponse {
 	return c.lastValidated.Load()
 }

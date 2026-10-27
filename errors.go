@@ -36,9 +36,14 @@ func (e *NetworkError) Error() string { return "licensr: " + e.Message + ": " + 
 func (e *NetworkError) Unwrap() error { return e.Cause }
 
 // TokenVerificationError means an offline token failed EdDSA verification,
-// was malformed, or has expired.
+// was malformed, was for another product, or has expired — or that its
+// JWKS couldn't be downloaded. Unwrap returns the underlying cause, so
+// errors.Is(err, context.DeadlineExceeded) tells "offline" from "forged".
 type TokenVerificationError struct {
 	Message string
+	Cause   error
 }
 
 func (e *TokenVerificationError) Error() string { return "licensr: " + e.Message }
+
+func (e *TokenVerificationError) Unwrap() error { return e.Cause }

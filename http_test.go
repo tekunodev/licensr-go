@@ -222,16 +222,96 @@ func TestStopsRetryingWhenTheContextIsCancelled(t *testing.T) {
 }
 
 func TestTimeoutAppliesPerAttempt(t *testing.T) {
-	api := newFakeAPI(t, jsonResponse(200, validateBody))
-	api.delay = 200 * time.Millisecond
+	// The first attempt stalls past Timeout; the retry gets a fresh Timeout and succeeds.
+	api := newFakeAPI(t, fakeResponse{status: 200, body: validateBody, delay: time.Minute}, jsonResponse(200, validateBody))
 	client := NewClient(Config{
 		APIKey: "pk_live_test", PluginSlug: "demo-plugin", BaseURL: api.URL,
-		Timeout: 10 * time.Millisecond, Retry: &RetryOptions{},
+		Timeout: 50 * time.Millisecond, Retry: &RetryOptions{MaxRetries: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+	})
+
+	if err := validate(client); err != nil {
+		t.Fatal(err)
+	}
+	if api.count() != 2 {
+		t.Errorf("requests = %d, want 2", api.count())
+	}
+}
+
+func TestTimeoutReturnsANetworkErrorOnceRetriesRunOut(t *testing.T) {
+	api := newFakeAPI(t, fakeResponse{status: 200, body: validateBody, delay: time.Minute})
+	client := NewClient(Config{
+		APIKey: "pk_live_test", PluginSlug: "demo-plugin", BaseURL: api.URL,
+		Timeout: 10 * time.Millisecond, Retry: &RetryOptions{MaxRetries: 0},
 	})
 
 	var netErr *NetworkError
 	if err := validate(client); !errors.As(err, &netErr) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCancellingTheContextAbortsAnInFlightRequest(t *testing.T) {
+	api := newFakeAPI(t, fakeResponse{status: 200, body: validateBody, delay: time.Minute})
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(20*time.Millisecond, cancel)
+
+	_, err := retryingClient(api, 3, Hooks{}).Validate(ctx, ValidateRequest{LicenseKey: "lic_abc"})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want a NetworkError wrapping context.Canceled", err)
+	}
+	if api.count() != 1 {
+		t.Errorf("requests = %d, a cancelled context must not be retried", api.count())
+	}
+}
+
+func TestReturnsAnErrorForA2xxWithAMalformedBody(t *testing.T) {
+	api := newFakeAPI(t, jsonResponse(200, `{"valid": tru`))
+
+	if err := validate(makeClient(api, Hooks{})); err == nil {
+		t.Fatal("expected a decode error")
+	}
+}
+
+func TestErrorBodyFieldsAreReadOneByOne(t *testing.T) {
+	cases := map[string]struct{ body, code, message string }{
+		"error without message":       {`{"detail": {"error": "activation_not_found"}}`, CodeActivationNotFound, "Not Found"},
+		"non-string message":          {`{"detail": {"error": "plugin_mismatch", "message": {"x": 1}}}`, CodePluginMismatch, "Not Found"},
+		"null error":                  {`{"detail": {"error": null, "message": "nope"}}`, CodeUnknownError, "nope"},
+		"validation item without msg": {`{"detail": ["oops"]}`, CodeValidationError, "Request validation failed"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			api := newFakeAPI(t, jsonResponse(404, tc.body))
+
+			var apiErr *APIError
+			if err := validate(makeClient(api, Hooks{})); !errors.As(err, &apiErr) {
+				t.Fatalf("err = %v", err)
+			}
+			if apiErr.Code != tc.code || apiErr.Message != tc.message {
+				t.Errorf("got (%q, %q), want (%q, %q)", apiErr.Code, apiErr.Message, tc.code, tc.message)
+			}
+		})
+	}
+}
+
+func TestParseRetryAfterIgnoresInvalidValues(t *testing.T) {
+	for _, header := range []string{"", "soon", "-1", "NaN", "+Inf", "Wed, 21 Oct 2026 07:28:00 GMT"} {
+		if d, ok := parseRetryAfter(header); ok {
+			t.Errorf("parseRetryAfter(%q) = %v, want no value", header, d)
+		}
+	}
+	if d, ok := parseRetryAfter("1.5"); !ok || d != 1500*time.Millisecond {
+		t.Errorf("parseRetryAfter(1.5) = %v, %v", d, ok)
+	}
+}
+
+func TestPartialRetryOptionsKeepTheDefaultDelays(t *testing.T) {
+	client := NewClient(Config{APIKey: "pk_live_test", PluginSlug: "demo-plugin", Retry: &RetryOptions{MaxRetries: 5}})
+
+	want := RetryOptions{MaxRetries: 5, BaseDelay: DefaultRetry.BaseDelay, MaxDelay: DefaultRetry.MaxDelay}
+	if client.retry != want {
+		t.Errorf("retry = %+v, want %+v", client.retry, want)
 	}
 }
 

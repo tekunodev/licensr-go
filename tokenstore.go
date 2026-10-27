@@ -14,9 +14,12 @@ import (
 )
 
 // CachedOfflineToken is the last-known-good offline token for one license.
+// It holds no claims on purpose: anything on disk can be edited, so read
+// the claims by verifying Token again (VerifyOptions.JWKS = JWKS).
 type CachedOfflineToken struct {
-	Token  string             `json:"token"`
-	Claims OfflineTokenClaims `json:"claims"`
+	Token string `json:"token"`
+	// The key set from FetchJWKS, so the token verifies with no network.
+	JWKS json.RawMessage `json:"jwks"`
 	// When this entry was cached.
 	CachedAt time.Time `json:"cached_at"`
 }
@@ -68,9 +71,9 @@ func (s *MemoryTokenStore) Clear(licenseKey string) error {
 	return nil
 }
 
-// FileTokenStore is a TokenStore with one file per license key, under a
-// per-plugin directory in the platform's app-data location (the same one
-// the C++ SDK uses):
+// FileTokenStore is a TokenStore with one JSON file per license key, under
+// a per-plugin directory in the platform's app-data location (the same one
+// the C++ SDK uses; the .json extension keeps it apart from C++'s .token files):
 //
 //	macOS:   ~/Library/Application Support/Licensr/<pluginSlug>/
 //	Windows: %APPDATA%\Licensr\<pluginSlug>\
@@ -127,6 +130,10 @@ func (s *FileTokenStore) Set(licenseKey string, entry CachedOfflineToken) error 
 		tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -145,7 +152,7 @@ func (s *FileTokenStore) Clear(licenseKey string) error {
 // as a raw path component — hashing sidesteps path separators, reserved
 // filenames, and length limits in one step.
 func (s *FileTokenStore) pathFor(licenseKey string) string {
-	return filepath.Join(s.dir, sha256Hex(licenseKey)+".token")
+	return filepath.Join(s.dir, sha256Hex(licenseKey)+".json")
 }
 
 func defaultAppDataRoot() string {

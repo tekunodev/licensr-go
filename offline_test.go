@@ -217,3 +217,115 @@ func TestCachesTheJWKSAndRefetchesOnAnUnknownKid(t *testing.T) {
 		t.Errorf("fetches = %d, ClearJWKSCache should force a fresh fetch", fetches.Load())
 	}
 }
+
+func TestRejectsATokenForAnotherProductWhenPluginSlugIsSet(t *testing.T) {
+	// Every product in a store is signed with the same key, so only the
+	// plugin_slug claim tells product A's token from product B's.
+	key := newSigningKey(t, "kid-1")
+	jwksURL, _ := serveJWKS(t, key)
+	token := key.sign(t, "EdDSA", claimsFor(0)) // plugin_slug: demo-plugin
+
+	_, err := VerifyOfflineToken(context.Background(), token, jwksURL, &VerifyOptions{PluginSlug: "pricier-plugin"})
+	expectVerificationError(t, err, `token is for product "demo-plugin", not "pricier-plugin"`)
+
+	if _, err := VerifyOfflineToken(context.Background(), token, jwksURL, &VerifyOptions{PluginSlug: "demo-plugin"}); err != nil {
+		t.Errorf("matching PluginSlug should verify: %v", err)
+	}
+}
+
+func TestVerifiesWithASavedJWKSAndNoNetwork(t *testing.T) {
+	key := newSigningKey(t, "kid-1")
+	jwksURL, fetches := serveJWKS(t, key)
+	jwks, err := FetchJWKS(context.Background(), jwksURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ClearJWKSCache() // A fresh launch: nothing cached in memory.
+
+	claims, err := VerifyOfflineToken(context.Background(), key.sign(t, "EdDSA", claimsFor(0)), "http://127.0.0.1:1/unreachable.json",
+		&VerifyOptions{JWKS: jwks})
+
+	if err != nil || claims.Sub != "lic-1" {
+		t.Fatalf("claims = %+v, err = %v", claims, err)
+	}
+	if fetches.Load() != 1 {
+		t.Errorf("fetches = %d, a saved JWKS must not be downloaded again", fetches.Load())
+	}
+}
+
+func TestFetchJWKSWarmsTheCache(t *testing.T) {
+	key := newSigningKey(t, "kid-1")
+	jwksURL, fetches := serveJWKS(t, key)
+
+	if _, err := FetchJWKS(context.Background(), jwksURL, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyOfflineToken(context.Background(), key.sign(t, "EdDSA", claimsFor(0)), jwksURL, nil); err != nil {
+		t.Fatal(err)
+	}
+	if fetches.Load() != 1 {
+		t.Errorf("fetches = %d, want 1", fetches.Load())
+	}
+}
+
+func TestAJWKSDownloadFailureUnwrapsToItsCause(t *testing.T) {
+	key := newSigningKey(t, "kid-1")
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := VerifyOfflineToken(ctx, key.sign(t, "EdDSA", claimsFor(0)), server.URL, nil)
+
+	// An app can tell "couldn't reach Licensr" (keep the last state) from a forged token (lock).
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want it to unwrap to context.DeadlineExceeded", err)
+	}
+	if _, err := FetchJWKS(ctx, server.URL, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("FetchJWKS err = %v, want it to unwrap to context.DeadlineExceeded", err)
+	}
+}
+
+func TestRejectsUnusableKeysAndHeaders(t *testing.T) {
+	key := newSigningKey(t, "kid-1")
+	token := key.sign(t, "EdDSA", claimsFor(0))
+	good := key.jwk()
+	cases := map[string]struct {
+		jwk      map[string]string
+		token    string
+		contains string
+	}{
+		"not an Ed25519 key": {jwk: map[string]string{"kty": "RSA", "kid": "kid-1", "x": good["x"]}, token: token, contains: "expected OKP/Ed25519"},
+		"short public key":   {jwk: map[string]string{"kty": "OKP", "crv": "Ed25519", "kid": "kid-1", "x": "AAAA"}, token: token, contains: "not a 32-byte Ed25519 key"},
+		"missing kid": {jwk: good, contains: "missing 'kid'",
+			token: b64JSON(t, map[string]string{"alg": "EdDSA"}) + "." + b64JSON(t, claimsFor(0)) + ".sig"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			jwks, _ := json.Marshal(map[string]any{"keys": []map[string]string{tc.jwk}})
+
+			_, err := VerifyOfflineToken(context.Background(), tc.token, "", &VerifyOptions{JWKS: jwks})
+
+			expectVerificationError(t, err, tc.contains)
+		})
+	}
+}
+
+func TestVerifiesConcurrentlyAgainstOneCache(t *testing.T) {
+	key := newSigningKey(t, "kid-1")
+	jwksURL, _ := serveJWKS(t, key)
+	token := key.sign(t, "EdDSA", claimsFor(0))
+
+	errs := make(chan error, 8)
+	for i := 0; i < cap(errs); i++ {
+		go func() {
+			_, err := VerifyOfflineToken(context.Background(), token, jwksURL, nil)
+			errs <- err
+		}()
+	}
+	for i := 0; i < cap(errs); i++ {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+}

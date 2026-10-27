@@ -28,14 +28,14 @@ type fakeAPI struct {
 	mu        sync.Mutex
 	requests  []recordedRequest
 	responses []fakeResponse
-	// Held before every response, e.g. to trip Config.Timeout.
-	delay time.Duration
 }
 
 type fakeResponse struct {
 	status int
 	body   string
 	header map[string]string
+	// Held before responding, e.g. to trip Config.Timeout; ends early if the client gives up.
+	delay time.Duration
 }
 
 func newFakeAPI(t *testing.T, responses ...fakeResponse) *fakeAPI {
@@ -54,7 +54,11 @@ func newFakeAPI(t *testing.T, responses ...fakeResponse) *fakeAPI {
 		resp := api.responses[min(len(api.requests), len(api.responses))-1]
 		api.mu.Unlock()
 
-		time.Sleep(api.delay)
+		select {
+		case <-time.After(resp.delay):
+		case <-r.Context().Done():
+			return
+		}
 		for k, v := range resp.header {
 			w.Header().Set(k, v)
 		}
@@ -241,17 +245,36 @@ func TestCheckoutPostsPlanAndEmail(t *testing.T) {
 }
 
 func TestHooksFireOnSuccess(t *testing.T) {
-	api := newFakeAPI(t, jsonResponse(200, validateBody))
-	var validated *ValidateResponse
-	client := makeClient(api, Hooks{OnValidated: func(r *ValidateResponse) { validated = r }})
+	api := newFakeAPI(t,
+		jsonResponse(200, validateBody),
+		jsonResponse(200, `{"activation_id": "act-1", "feature_flags": null, "activation": {"type": "seat", "identifier": "x"}}`),
+		jsonResponse(200, `{"deactivated": true}`),
+		jsonResponse(200, `{"token": "jwt", "details": {"algorithm": "EdDSA", "kid": "k", "issued_at": "", "expires_at": "", "jwks_url": ""}}`))
+	var fired []string
+	var client *Client
+	client = makeClient(api, Hooks{
+		OnValidated: func(r *ValidateResponse) {
+			if client.LastValidated() != r {
+				t.Error("LastValidated inside OnValidated should already be this result")
+			}
+			fired = append(fired, "validated")
+		},
+		OnActivated:   func(*ActivateResponse) { fired = append(fired, "activated") },
+		OnDeactivated: func(*DeactivateResponse) { fired = append(fired, "deactivated") },
+		OnTokenIssued: func(*TokenResponse) { fired = append(fired, "tokenIssued") },
+	})
+	ctx := context.Background()
 
-	res, err := client.Validate(context.Background(), ValidateRequest{LicenseKey: "lic_abc"})
-	if err != nil {
+	_, err1 := client.Validate(ctx, ValidateRequest{LicenseKey: "lic_abc"})
+	_, err2 := client.Activate(ctx, ActivateRequest{LicenseKey: "lic_abc", ActivationType: ActivationSeat, Identifier: "x"})
+	_, err3 := client.Deactivate(ctx, DeactivateRequest{LicenseKey: "lic_abc", ActivationID: "act-1"})
+	_, err4 := client.Token(ctx, ValidateRequest{LicenseKey: "lic_abc"})
+	if err := errors.Join(err1, err2, err3, err4); err != nil {
 		t.Fatal(err)
 	}
 
-	if validated != res {
-		t.Error("OnValidated did not receive the result")
+	if want := []string{"validated", "activated", "deactivated", "tokenIssued"}; !reflect.DeepEqual(fired, want) {
+		t.Errorf("fired = %v, want %v", fired, want)
 	}
 }
 

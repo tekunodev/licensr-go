@@ -90,31 +90,35 @@ func parseErrorDetail(resp response) (code, message string) {
 	}
 
 	// {"detail": {"error": "...", "message": "..."}} — every hand-written
-	// HTTPException in the license/billing routers uses this shape.
-	var detail struct {
-		Error   *string `json:"error"`
-		Message *string `json:"message"`
-	}
-	if json.Unmarshal(body.Detail, &detail) == nil && detail.Error != nil {
-		if detail.Message != nil {
-			return *detail.Error, *detail.Message
+	// HTTPException in the license/billing routers uses this shape. Fields
+	// are checked one by one, like the JS SDK, so an odd type in one
+	// doesn't lose the other.
+	var detail map[string]json.RawMessage
+	if json.Unmarshal(body.Detail, &detail) == nil {
+		if raw, ok := detail["error"]; ok {
+			return stringOr(raw, CodeUnknownError), stringOr(detail["message"], fallback)
 		}
-		return *detail.Error, fallback
 	}
 
 	// {"detail": [{"msg": "...", "loc": [...]}, ...]} — FastAPI/Pydantic's
 	// own 422 shape for request validation errors, not a hand-written one.
-	var list []struct {
-		Msg *string `json:"msg"`
-	}
+	var list []json.RawMessage
 	if json.Unmarshal(body.Detail, &list) == nil && len(list) > 0 {
-		if list[0].Msg != nil {
-			return CodeValidationError, *list[0].Msg
-		}
-		return CodeValidationError, "Request validation failed"
+		var first map[string]json.RawMessage
+		_ = json.Unmarshal(list[0], &first)
+		return CodeValidationError, stringOr(first["msg"], "Request validation failed")
 	}
 
 	return CodeUnknownError, fallback
+}
+
+// stringOr decodes raw as a JSON string, or returns fallback (including for null).
+func stringOr(raw json.RawMessage, fallback string) string {
+	var s *string
+	if json.Unmarshal(raw, &s) != nil || s == nil {
+		return fallback
+	}
+	return *s
 }
 
 // do performs one logical API call, retrying network errors / 429 / 5xx

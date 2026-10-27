@@ -16,11 +16,22 @@ import (
 
 // VerifyOptions tunes VerifyOfflineToken. A nil *VerifyOptions uses the defaults.
 type VerifyOptions struct {
-	// Used for the JWKS lookup. Defaults to http.DefaultClient.
+	// Reject tokens minted for any other product. Every product in a store
+	// is signed with the store's one key, so without this a token for one
+	// of your products also verifies for another — set it to your PluginSlug.
+	PluginSlug string
+	// Verify against this key set (from FetchJWKS, saved alongside the
+	// token) instead of downloading it, so verification needs no network.
+	JWKS json.RawMessage
+	// Used to download the JWKS. Defaults to http.DefaultClient.
 	HTTPClient *http.Client
 	// Accept exp/nbf this far past/before now (clock skew tolerance). Zero means 60s.
 	ClockTolerance time.Duration
 }
+
+// jwksFetchTimeout bounds a JWKS download when ctx has no earlier deadline,
+// so a stalled network can't hang an app at launch.
+const jwksFetchTimeout = 10 * time.Second
 
 type jwk struct {
 	Kty string `json:"kty"`
@@ -32,7 +43,7 @@ type jwk struct {
 }
 
 // A plugin's signing key is essentially never rotated mid-process, so a
-// process-lifetime cache (refreshed once on an unrecognized kid, in case it
+// process-lifetime cache (refetched on an unrecognized kid, in case it
 // *was* rotated) avoids a JWKS fetch on every verification — mirrors the
 // JS and C# SDKs' caches.
 var jwksCache sync.Map // jwksURL → []jwk
@@ -47,9 +58,11 @@ func ClearJWKSCache() {
 }
 
 // VerifyOfflineToken verifies an offline license token (from Client.Token)
-// fully offline: no network call beyond fetching (and caching) the
-// plugin's public JWKS. Returns a *TokenVerificationError on a bad
-// signature, wrong algorithm, or an expired/not-yet-valid token.
+// with no network call beyond fetching (and caching) the plugin's public
+// JWKS — or none at all when VerifyOptions.JWKS is set. Returns a
+// *TokenVerificationError on a bad signature, wrong algorithm, another
+// product's token, an expired/not-yet-valid token, or a failed JWKS
+// download (errors.Unwrap gives the cause).
 //
 // Tokens carry no revocation signal — this only proves the token was
 // genuinely issued by Licensr and hasn't expired, not that the license is
@@ -61,9 +74,25 @@ func VerifyOfflineToken(ctx context.Context, token, jwksURL string, opts *Verify
 	}
 	claims, err := verifyOfflineToken(ctx, token, jwksURL, opts)
 	if err != nil {
-		return nil, &TokenVerificationError{Message: "offline token verification failed: " + err.Error()}
+		return nil, &TokenVerificationError{Message: "offline token verification failed: " + err.Error(), Cause: err}
 	}
 	return claims, nil
+}
+
+// FetchJWKS downloads the plugin's public key set from jwksURL (the
+// TokenResponse's Details.JWKSURL) and caches it for VerifyOfflineToken.
+// Save the result with the token (CachedOfflineToken.JWKS) and pass it back
+// as VerifyOptions.JWKS to verify on a later launch with no network.
+func FetchJWKS(ctx context.Context, jwksURL string, opts *VerifyOptions) (json.RawMessage, error) {
+	if opts == nil {
+		opts = &VerifyOptions{}
+	}
+	data, keys, err := fetchJWKS(ctx, jwksURL, opts.HTTPClient)
+	if err != nil {
+		return nil, &TokenVerificationError{Message: err.Error(), Cause: err}
+	}
+	jwksCache.Store(jwksURL, keys)
+	return data, nil
 }
 
 func verifyOfflineToken(ctx context.Context, token, jwksURL string, opts *VerifyOptions) (*OfflineTokenClaims, error) {
@@ -86,7 +115,7 @@ func verifyOfflineToken(ctx context.Context, token, jwksURL string, opts *Verify
 		return nil, errors.New("token header is missing 'kid'")
 	}
 
-	key, err := findKey(ctx, jwksURL, header.Kid, opts.HTTPClient)
+	key, err := findKey(ctx, jwksURL, header.Kid, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -113,6 +142,9 @@ func verifyOfflineToken(ctx context.Context, token, jwksURL string, opts *Verify
 	if claims.Nbf-tolerance > now {
 		return nil, errors.New("token is not yet valid ('nbf' is in the future)")
 	}
+	if opts.PluginSlug != "" && claims.PluginSlug != opts.PluginSlug {
+		return nil, fmt.Errorf("token is for product %q, not %q", claims.PluginSlug, opts.PluginSlug)
+	}
 	return &claims, nil
 }
 
@@ -124,20 +156,28 @@ func decodeSegment(segment string, out any) error {
 	return json.Unmarshal(data, out)
 }
 
-func findKey(ctx context.Context, jwksURL, kid string, client *http.Client) (ed25519.PublicKey, error) {
-	keys, _ := jwksCache.Load(jwksURL)
-	match := findKid(keys, kid)
-	if match == nil {
-		// Unknown kid (first lookup, or a rotation since we last cached) — (re)fetch once.
-		fetched, err := fetchJWKS(ctx, jwksURL, client)
+func findKey(ctx context.Context, jwksURL, kid string, opts *VerifyOptions) (ed25519.PublicKey, error) {
+	var match *jwk
+	if opts.JWKS != nil {
+		keys, err := parseJWKS(opts.JWKS)
 		if err != nil {
 			return nil, err
 		}
-		jwksCache.Store(jwksURL, fetched)
-		match = findKid(fetched, kid)
+		match = findKid(keys, kid)
+	} else {
+		keys, _ := jwksCache.Load(jwksURL)
+		if match = findKid(keys, kid); match == nil {
+			// Unknown kid (first lookup, or a rotation since we last cached) — refetch.
+			_, fetched, err := fetchJWKS(ctx, jwksURL, opts.HTTPClient)
+			if err != nil {
+				return nil, err
+			}
+			jwksCache.Store(jwksURL, fetched)
+			match = findKid(fetched, kid)
+		}
 	}
 	if match == nil {
-		return nil, fmt.Errorf("no key with kid %q in JWKS at %s", kid, jwksURL)
+		return nil, fmt.Errorf("no key with kid %q in the JWKS", kid)
 	}
 	if match.Kty != "OKP" || match.Crv != "Ed25519" {
 		return nil, fmt.Errorf("key %q is %s/%s, expected OKP/Ed25519", kid, match.Kty, match.Crv)
@@ -149,6 +189,7 @@ func findKey(ctx context.Context, jwksURL, kid string, client *http.Client) (ed2
 	return key, nil
 }
 
+// findKid takes any so a missing sync.Map entry (nil) needs no special case.
 func findKid(keys any, kid string) *jwk {
 	list, _ := keys.([]jwk)
 	for i := range list {
@@ -159,31 +200,41 @@ func findKid(keys any, kid string) *jwk {
 	return nil
 }
 
-func fetchJWKS(ctx context.Context, jwksURL string, client *http.Client) ([]jwk, error) {
+func fetchJWKS(ctx context.Context, jwksURL string, client *http.Client) (json.RawMessage, []jwk, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
+	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch JWKS from %s: %w", jwksURL, err)
+		return nil, nil, fmt.Errorf("failed to fetch JWKS from %s: %w", jwksURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("failed to fetch JWKS from %s: HTTP %d", jwksURL, resp.StatusCode)
+		return nil, nil, fmt.Errorf("failed to fetch JWKS from %s: HTTP %d", jwksURL, resp.StatusCode)
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("failed to fetch JWKS from %s: %w", jwksURL, err)
 	}
+	keys, err := parseJWKS(data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("JWKS from %s: %w", jwksURL, err)
+	}
+	return data, keys, nil
+}
+
+func parseJWKS(data []byte) ([]jwk, error) {
 	var set struct {
 		Keys []jwk `json:"keys"`
 	}
 	if err := json.Unmarshal(data, &set); err != nil {
-		return nil, fmt.Errorf("JWKS response from %s is not valid JSON: %w", jwksURL, err)
+		return nil, fmt.Errorf("JWKS is not valid JSON: %w", err)
 	}
 	return set.Keys, nil
 }

@@ -2,9 +2,7 @@
 // service: boot from a cached offline token when there is one, otherwise
 // validate online, activate this machine's seat, and cache a fresh token.
 //
-//	LICENSR_API_KEY=pk_live_... LICENSR_PLUGIN_SLUG=my-plugin \
-//	LICENSR_JWKS_URL=https://api.licensr.app/v1/license/jwks/<store>/my-plugin.json \
-//	go run ./examples/cli lic_...
+//	LICENSR_API_KEY=pk_live_... LICENSR_PLUGIN_SLUG=my-plugin go run ./examples/cli lic_...
 package main
 
 import (
@@ -43,10 +41,11 @@ func run(ctx context.Context, licenseKey string) error {
 	})
 	store := licensr.NewFileTokenStore(slug, os.Getenv("LICENSR_TOKEN_DIR"))
 
-	// 1. Offline first: a cached token still inside its validity window unlocks without the network.
+	// 1. Offline first: a cached token still inside its validity window
+	// unlocks with no network at all — its key set was saved with it.
 	if cached, err := store.Get(licenseKey); err == nil && cached != nil {
-		jwksURL := os.Getenv("LICENSR_JWKS_URL")
-		if claims, err := licensr.VerifyOfflineToken(ctx, cached.Token, jwksURL, nil); err == nil && claims.Valid {
+		opts := &licensr.VerifyOptions{PluginSlug: slug, JWKS: cached.JWKS}
+		if claims, err := licensr.VerifyOfflineToken(ctx, cached.Token, "", opts); err == nil && claims.Valid {
 			fmt.Printf("unlocked offline (%s, token cached %s)\n", claims.Entitlement, cached.CachedAt.Format(time.RFC3339))
 			return nil
 		}
@@ -76,11 +75,14 @@ func run(ctx context.Context, licenseKey string) error {
 	if err != nil {
 		return err
 	}
-	claims, err := licensr.VerifyOfflineToken(ctx, token.Token, token.Details.JWKSURL, nil)
+	jwks, err := licensr.FetchJWKS(ctx, token.Details.JWKSURL, nil)
 	if err != nil {
 		return err
 	}
-	if err := store.Set(licenseKey, licensr.CachedOfflineToken{Token: token.Token, Claims: *claims, CachedAt: time.Now()}); err != nil {
+	if _, err := licensr.VerifyOfflineToken(ctx, token.Token, "", &licensr.VerifyOptions{PluginSlug: slug, JWKS: jwks}); err != nil {
+		return err
+	}
+	if err := store.Set(licenseKey, licensr.CachedOfflineToken{Token: token.Token, JWKS: jwks, CachedAt: time.Now()}); err != nil {
 		return err
 	}
 	fmt.Printf("unlocked online (%s); offline token cached until %s\n", result.Entitlement, token.Details.ExpiresAt)
