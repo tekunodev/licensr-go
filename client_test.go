@@ -238,9 +238,30 @@ func TestCheckoutPostsPlanAndEmail(t *testing.T) {
 	if res.CheckoutURL != "https://pay.example.test/session" {
 		t.Errorf("CheckoutURL = %s", res.CheckoutURL)
 	}
+	if res.TestClockID != nil {
+		t.Errorf("TestClockID = %v, want nil", *res.TestClockID)
+	}
 	want := map[string]any{"plan_id": "plan-1", "customer_email": "a@example.test", "success_url": nil, "cancel_url": nil}
 	if !reflect.DeepEqual(api.last().body, want) || api.last().path != "/v1/billing/checkout" {
 		t.Errorf("%s body = %v, want %v", api.last().path, api.last().body, want)
+	}
+}
+
+func TestCheckoutSendsTestClockAndMapsID(t *testing.T) {
+	api := newFakeAPI(t, jsonResponse(200, `{"checkout_url": "https://pay.example.test/session", "test_clock_id": "clock_123"}`))
+	client := makeClient(api, Hooks{})
+
+	res, err := client.Checkout(context.Background(), CheckoutRequest{PlanID: "plan-1", CustomerEmail: "a@example.test", TestClock: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if res.TestClockID == nil || *res.TestClockID != "clock_123" {
+		t.Errorf("TestClockID = %v, want clock_123", res.TestClockID)
+	}
+	want := map[string]any{"plan_id": "plan-1", "customer_email": "a@example.test", "success_url": nil, "cancel_url": nil, "test_clock": true}
+	if !reflect.DeepEqual(api.last().body, want) {
+		t.Errorf("body = %v, want %v", api.last().body, want)
 	}
 }
 

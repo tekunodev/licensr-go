@@ -145,15 +145,20 @@ func (c *Client) Activations(ctx context.Context, req ActivationsRequest) (*Acti
 
 // Checkout starts a hosted checkout session for a plan; redirect the user to the returned URL.
 func (c *Client) Checkout(ctx context.Context, req CheckoutRequest) (*CheckoutResponse, error) {
+	body := map[string]any{
+		"plan_id":        req.PlanID,
+		"customer_email": req.CustomerEmail,
+		"success_url":    nullIfEmpty(req.SuccessURL),
+		"cancel_url":     nullIfEmpty(req.CancelURL),
+	}
+	// Sent only when asked for, so servers without test clocks see the same body.
+	if req.TestClock {
+		body["test_clock"] = true
+	}
 	return call[CheckoutResponse](ctx, c, "checkout", requestSpec{
 		method: http.MethodPost,
 		path:   "v1/billing/checkout",
-		body: map[string]any{
-			"plan_id":        req.PlanID,
-			"customer_email": req.CustomerEmail,
-			"success_url":    nullIfEmpty(req.SuccessURL),
-			"cancel_url":     nullIfEmpty(req.CancelURL),
-		},
+		body:   body,
 	}, nil)
 }
 

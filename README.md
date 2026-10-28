@@ -49,6 +49,8 @@ Every method takes a `context.Context`, blocks until it has an answer, and retur
 | `Checkout(ctx, CheckoutRequest{...})`       | `POST /v1/billing/checkout`   | Returns `CheckoutURL`. Requires a key with the `checkout` scope.                                                         |
 | `LastValidated()`                           | _(no request)_                | The last successful `Validate` result, or `nil`. Never blocks — safe on a hot path.                                      |
 
+With a test key (`pk_test_…`), set `TestClock: true` on `CheckoutRequest` to put the buyer on a Stripe test clock you can fast-forward to try renewals; the response returns its id as `TestClockID`.
+
 `Config` also takes `BaseURL`, `DeviceID` (buckets rate limits per installation — pass the hardware ID), `Origin`, `Timeout` (per attempt), `Retry` (network errors / 429 / 5xx, exponential backoff + full jitter, honors `Retry-After`; default 2 retries, and delays you leave at zero keep their 300ms/5s defaults), `HTTPClient`, and `Hooks` (`OnValidated`, `OnActivated`, `OnDeactivated`, `OnTokenIssued`, `OnRetry`, `OnError`).
 
 ### Offline verification and token storage

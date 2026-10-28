@@ -156,10 +156,15 @@ type CheckoutRequest struct {
 	SuccessURL string
 	// Empty sends null (the plan's default redirect).
 	CancelURL string
+	// Test keys (pk_test_...) only. Puts the buyer on a new Stripe test clock
+	// you can fast-forward to try renewals. False leaves it out of the request.
+	TestClock bool
 }
 
 type CheckoutResponse struct {
 	CheckoutURL string `json:"checkout_url"`
+	// The Stripe test clock the buyer is on, when TestClock asked for one.
+	TestClockID *string `json:"test_clock_id"`
 }
 
 // Every documented detail.error code from the license API — see
