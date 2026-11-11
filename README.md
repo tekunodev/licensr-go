@@ -66,6 +66,8 @@ err = store.Set(licenseKey, licensr.CachedOfflineToken{Token: token.Token, JWKS:
 // Next launch, no network: VerifyOfflineToken(ctx, cached.Token, "", &licensr.VerifyOptions{PluginSlug: "my-plugin", JWKS: cached.JWKS})
 ```
 
+A token minted with a test key (`pk_test_…`) is refused, because test and live tokens are signed with the same key. In a test build, set `AllowTestTokens: true` in `VerifyOptions`.
+
 - **Always set `VerifyOptions.PluginSlug`.** Every product in a store is signed with the same key, so without it one product's token also verifies for another.
 - Without `VerifyOptions.JWKS`, the key set is downloaded from the URL (10s timeout), cached for the process lifetime, and downloaded again on an unknown `kid`; `ClearJWKSCache` forces a fresh download.
 - Offline tokens carry no revocation signal — re-validate online before `claims.Exp`.

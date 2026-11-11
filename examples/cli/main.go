@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	licensr "github.com/tekunodev/licensr-go"
@@ -40,11 +41,14 @@ func run(ctx context.Context, licenseKey string) error {
 		Timeout:    10 * time.Second,
 	})
 	store := licensr.NewFileTokenStore(slug, os.Getenv("LICENSR_TOKEN_DIR"))
+	// Trying this example with a test key: accept the test tokens it mints.
+	// A build you ship never sets this.
+	allowTest := strings.HasPrefix(os.Getenv("LICENSR_API_KEY"), "pk_test_")
 
 	// 1. Offline first: a cached token still inside its validity window
 	// unlocks with no network at all — its key set was saved with it.
 	if cached, err := store.Get(licenseKey); err == nil && cached != nil {
-		opts := &licensr.VerifyOptions{PluginSlug: slug, JWKS: cached.JWKS}
+		opts := &licensr.VerifyOptions{PluginSlug: slug, JWKS: cached.JWKS, AllowTestTokens: allowTest}
 		if claims, err := licensr.VerifyOfflineToken(ctx, cached.Token, "", opts); err == nil && claims.Valid {
 			fmt.Printf("unlocked offline (%s, token cached %s)\n", claims.Entitlement, cached.CachedAt.Format(time.RFC3339))
 			return nil
@@ -79,7 +83,8 @@ func run(ctx context.Context, licenseKey string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := licensr.VerifyOfflineToken(ctx, token.Token, "", &licensr.VerifyOptions{PluginSlug: slug, JWKS: jwks}); err != nil {
+	verify := &licensr.VerifyOptions{PluginSlug: slug, JWKS: jwks, AllowTestTokens: allowTest}
+	if _, err := licensr.VerifyOfflineToken(ctx, token.Token, "", verify); err != nil {
 		return err
 	}
 	if err := store.Set(licenseKey, licensr.CachedOfflineToken{Token: token.Token, JWKS: jwks, CachedAt: time.Now()}); err != nil {
