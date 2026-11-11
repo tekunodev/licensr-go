@@ -233,6 +233,34 @@ func TestRejectsATokenForAnotherProductWhenPluginSlugIsSet(t *testing.T) {
 	}
 }
 
+func TestRejectsATestKeysTokenUnlessAllowed(t *testing.T) {
+	// Test and live tokens share the signing key, so only the livemode claim
+	// stops a free test license from unlocking a shipped build.
+	key := newSigningKey(t, "kid-1")
+	jwksURL, _ := serveJWKS(t, key)
+	testClaims := claimsFor(0)
+	testClaims["livemode"] = false
+	token := key.sign(t, "EdDSA", testClaims)
+
+	_, err := VerifyOfflineToken(context.Background(), token, jwksURL, nil)
+	expectVerificationError(t, err, "minted with a test key")
+
+	claims, err := VerifyOfflineToken(context.Background(), token, jwksURL, &VerifyOptions{AllowTestTokens: true})
+	if err != nil || claims.Livemode == nil || *claims.Livemode {
+		t.Fatalf("AllowTestTokens should verify a test token: %v %+v", err, claims)
+	}
+
+	liveClaims := claimsFor(0)
+	liveClaims["livemode"] = true
+	if _, err := VerifyOfflineToken(context.Background(), key.sign(t, "EdDSA", liveClaims), jwksURL, nil); err != nil {
+		t.Errorf("a live token should verify: %v", err)
+	}
+	// claimsFor carries no livemode, like a token from before the claim existed.
+	if _, err := VerifyOfflineToken(context.Background(), key.sign(t, "EdDSA", claimsFor(0)), jwksURL, nil); err != nil {
+		t.Errorf("a token without the claim should verify: %v", err)
+	}
+}
+
 func TestVerifiesWithASavedJWKSAndNoNetwork(t *testing.T) {
 	key := newSigningKey(t, "kid-1")
 	jwksURL, fetches := serveJWKS(t, key)

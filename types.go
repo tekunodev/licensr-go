@@ -131,12 +131,14 @@ type TokenResponse struct {
 // OfflineTokenClaims are the claims embedded in the offline token. Flat, as
 // in any JWT; carries the same facts as ValidateResponse.
 type OfflineTokenClaims struct {
-	Sub              string          `json:"sub"`
-	Iss              string          `json:"iss"`
-	Iat              int64           `json:"iat"`
-	Nbf              int64           `json:"nbf"`
-	Exp              int64           `json:"exp"`
-	PluginSlug       string          `json:"plugin_slug"`
+	Sub        string `json:"sub"`
+	Iss        string `json:"iss"`
+	Iat        int64  `json:"iat"`
+	Nbf        int64  `json:"nbf"`
+	Exp        int64  `json:"exp"`
+	PluginSlug string `json:"plugin_slug"`
+	// False for a token minted with a test key; nil on tokens from before the claim.
+	Livemode         *bool           `json:"livemode"`
 	PlanID           *string         `json:"plan_id"`
 	Status           LicenseStatus   `json:"status"`
 	Valid            bool            `json:"valid"`

@@ -27,6 +27,10 @@ type VerifyOptions struct {
 	HTTPClient *http.Client
 	// Accept exp/nbf this far past/before now (clock skew tolerance). Zero means 60s.
 	ClockTolerance time.Duration
+	// Accept tokens minted with a test key (claim "livemode": false). Test
+	// and live tokens share the signing key, so a shipped build must refuse
+	// them; set this only in a build that uses a pk_test_ key.
+	AllowTestTokens bool
 }
 
 // jwksFetchTimeout bounds a JWKS download when ctx has no earlier deadline,
@@ -61,8 +65,9 @@ func ClearJWKSCache() {
 // with no network call beyond fetching (and caching) the plugin's public
 // JWKS — or none at all when VerifyOptions.JWKS is set. Returns a
 // *TokenVerificationError on a bad signature, wrong algorithm, another
-// product's token, an expired/not-yet-valid token, or a failed JWKS
-// download (errors.Unwrap gives the cause).
+// product's token, a test-key token (unless AllowTestTokens), an
+// expired/not-yet-valid token, or a failed JWKS download (errors.Unwrap
+// gives the cause).
 //
 // Tokens carry no revocation signal — this only proves the token was
 // genuinely issued by Licensr and hasn't expired, not that the license is
@@ -144,6 +149,10 @@ func verifyOfflineToken(ctx context.Context, token, jwksURL string, opts *Verify
 	}
 	if opts.PluginSlug != "" && claims.PluginSlug != opts.PluginSlug {
 		return nil, fmt.Errorf("token is for product %q, not %q", claims.PluginSlug, opts.PluginSlug)
+	}
+	// Tokens from before the claim existed carry none and are accepted.
+	if claims.Livemode != nil && !*claims.Livemode && !opts.AllowTestTokens {
+		return nil, errors.New("token was minted with a test key (set AllowTestTokens in a test build)")
 	}
 	return &claims, nil
 }
